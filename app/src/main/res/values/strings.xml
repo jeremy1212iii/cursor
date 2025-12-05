@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sit-Up Counter</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="pause">Pause</string>
+    <string name="reset">Reset</string>
+    <string name="count">Count: %d</string>
+    <string name="camera_permission_required">Camera permission is required</string>
+    <string name="position_yourself">Position yourself in front of the camera</string>
+</resources>
