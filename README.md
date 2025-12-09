@@ -196,3 +196,221 @@ A complete sit-up is counted when the cycle completes: DOWN → GOING_UP → UP 
 - ✅ Added gradle.properties for project configuration
 - ✅ All code files finalized and tested for syntax
 - ✅ Project ready for Android Studio import and build
+
+---
+
+## SSL I/O Bottleneck Analysis and Solutions
+
+### 2025-12-09 06:14:33
+
+### Problem Analysis
+
+**Stack Trace Analysis:**
+```
+Thread: "XNIO-5 I/O-4"
+CPU Usage: 97.71%
+Total Time: 4397ms
+Delta Time: 196ms
+State: RUNNABLE
+```
+
+**Root Cause:**
+The thread is spending excessive CPU time (97.71%) in SSL/TLS operations, specifically:
+- `SSLEngineImpl.wrap()` - SSL encryption operations
+- `SslConduit.doWrap()` / `SslConduit.doUnwrap()` - Undertow SSL handling
+- High CPU usage indicates CPU-bound cryptographic operations
+
+**Common Causes:**
+1. **Weak SSL/TLS Configuration**: Using CPU-intensive cipher suites
+2. **Large Payload Sizes**: Encrypting/decrypting large data chunks
+3. **Frequent SSL Handshakes**: Re-negotiating SSL connections too often
+4. **Synchronous I/O**: Blocking operations in I/O threads
+5. **Missing SSL Session Caching**: Not reusing SSL sessions
+6. **Inefficient Buffer Management**: Small buffer sizes causing frequent operations
+
+### Solution Plan
+
+#### Phase 1: SSL Configuration Optimization (Immediate Impact)
+
+1. **Optimize Cipher Suite Selection**
+   - Use AES-GCM instead of CBC (hardware-accelerated)
+   - Prefer ECDHE over DHE (faster key exchange)
+   - Disable weak/legacy cipher suites
+   - Enable TLS 1.3 (more efficient than TLS 1.2)
+
+2. **Enable SSL Session Caching**
+   - Configure session cache size
+   - Enable session reuse to avoid re-handshakes
+   - Set appropriate session timeout
+
+3. **Optimize Buffer Sizes**
+   - Increase SSL buffer sizes to reduce wrap/unwrap calls
+   - Configure appropriate application buffer sizes
+
+#### Phase 2: Undertow/XNIO Configuration (Performance Tuning)
+
+1. **I/O Thread Pool Configuration**
+   - Increase I/O worker threads if CPU-bound
+   - Balance between I/O and worker threads
+   - Configure thread pool sizes based on CPU cores
+
+2. **Connection Pooling**
+   - Enable connection pooling
+   - Configure max connections per endpoint
+   - Set appropriate connection timeouts
+
+3. **Asynchronous Processing**
+   - Move CPU-intensive operations off I/O threads
+   - Use worker threads for SSL operations if needed
+   - Implement async handlers for long-running tasks
+
+#### Phase 3: JVM/System Level Optimization
+
+1. **JVM SSL Provider**
+   - Use OpenSSL provider if available (faster than default)
+   - Consider Conscrypt (Google's SSL provider)
+   - Enable hardware acceleration for crypto operations
+
+2. **JVM Tuning**
+   - Increase heap size if needed
+   - Tune GC settings for low latency
+   - Enable JIT compiler optimizations
+
+3. **System Level**
+   - Use hardware-accelerated crypto (AES-NI, etc.)
+   - Monitor network I/O for bottlenecks
+   - Check for network packet fragmentation
+
+### Implementation Steps
+
+#### Step 1: Configure Undertow SSL Settings
+
+**Configuration Example:**
+```java
+// Optimize SSL configuration
+SslContext sslContext = SslContext.builder()
+    .protocols("TLSv1.3", "TLSv1.2")  // Prefer TLS 1.3
+    .cipherSuites(
+        "TLS_AES_256_GCM_SHA384",      // TLS 1.3
+        "TLS_AES_128_GCM_SHA256",      // TLS 1.3
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",  // TLS 1.2
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"   // TLS 1.2
+    )
+    .sessionCacheSize(10000)           // Enable session caching
+    .sessionTimeout(3600)               // 1 hour timeout
+    .build();
+```
+
+#### Step 2: Optimize XNIO Worker Configuration
+
+**Configuration Example:**
+```java
+// Configure I/O workers
+XNIO xnio = XNIO.getInstance();
+OptionMap.Builder builder = OptionMap.builder()
+    .set(Options.WORKER_IO_THREADS, Runtime.getRuntime().availableProcessors() * 2)
+    .set(Options.WORKER_TASK_CORE_THREADS, 20)
+    .set(Options.WORKER_TASK_MAX_THREADS, 100)
+    .set(Options.TCP_NODELAY, true)
+    .set(Options.KEEP_ALIVE, true)
+    .set(Options.READ_TIMEOUT, 30000)
+    .set(Options.WRITE_TIMEOUT, 30000);
+    
+Worker worker = xnio.createWorker(builder.getMap());
+```
+
+#### Step 3: Enable SSL Session Reuse
+
+**Configuration:**
+```java
+// In Undertow builder
+Undertow.builder()
+    .addHttpsListener(8443, "0.0.0.0", sslContext)
+    .setServerOption(UndertowOptions.SSL_USER_CIPHER_SUITES_ORDER, true)
+    .setServerOption(UndertowOptions.ENABLE_HTTP2, true)  // HTTP/2 is more efficient
+    .build();
+```
+
+#### Step 4: Monitor and Profile
+
+1. **Enable SSL Debugging** (temporary):
+   ```
+   -Djavax.net.debug=ssl:handshake:verbose
+   ```
+
+2. **Profile SSL Operations**:
+   - Use JProfiler or YourKit to identify hotspots
+   - Monitor SSL handshake frequency
+   - Track wrap/unwrap operation counts
+
+3. **Metrics Collection**:
+   - Track SSL handshake duration
+   - Monitor connection reuse rate
+   - Measure CPU usage per SSL operation
+
+### Expected Improvements
+
+After implementing these optimizations:
+- **CPU Usage**: Reduce from 97.71% to <50% for SSL operations
+- **Latency**: Reduce SSL operation time by 30-50%
+- **Throughput**: Increase concurrent SSL connections by 2-3x
+- **Session Reuse**: Achieve 70-90% session reuse rate
+
+### Monitoring and Validation
+
+1. **Key Metrics to Track**:
+   - SSL handshake count per second
+   - Average SSL operation time
+   - CPU usage per SSL thread
+   - Session cache hit rate
+   - Connection reuse percentage
+
+2. **Validation Steps**:
+   - Run load tests before and after changes
+   - Compare CPU usage profiles
+   - Measure response time improvements
+   - Verify no security degradation
+
+### Additional Recommendations
+
+1. **Consider Alternative SSL Implementations**:
+   - OpenSSL via JNI (if performance critical)
+   - Conscrypt (Google's high-performance SSL)
+   - Netty's native SSL (if migrating is possible)
+
+2. **Application-Level Optimizations**:
+   - Minimize data transferred over SSL
+   - Use compression carefully (may increase CPU)
+   - Implement connection pooling at application level
+   - Cache frequently accessed SSL-encrypted data
+
+3. **Infrastructure Considerations**:
+   - Use load balancer with SSL termination (offload SSL)
+   - Consider dedicated SSL hardware accelerators
+   - Implement CDN for static content (reduce SSL load)
+
+### Status
+
+- ✅ Problem analysis completed
+- ✅ Solution plan created
+- ✅ Configuration examples and code samples created (see `ssl-optimization-config.md`)
+- ⏳ Implementation pending (requires access to server configuration)
+- ⏳ Performance testing pending
+
+### Configuration Files
+
+- **ssl-optimization-config.md**: Detailed configuration examples, code samples, and implementation guide
+
+### Next Steps
+
+1. Review current Undertow/XNIO configuration
+2. Implement SSL configuration optimizations (use examples in `ssl-optimization-config.md`)
+3. Configure XNIO worker threads appropriately
+4. Enable SSL session caching
+5. Run performance tests and compare results
+6. Monitor production metrics after deployment
+
+### Key Files
+
+- `README.md` - This file with analysis and plan
+- `ssl-optimization-config.md` - Practical implementation examples and code
